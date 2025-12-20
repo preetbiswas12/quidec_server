@@ -142,6 +142,30 @@ app.get('/api/online-users', (req, res) => {
   res.json({ onlineUsers });
 });
 
+// Health check endpoint for Render
+app.get('/health', async (req, res) => {
+  try {
+    // Test MongoDB connection
+    await db.admin().ping();
+    
+    res.json({ 
+      status: 'ok',
+      timestamp: new Date(),
+      uptime: process.uptime(),
+      mongodb: 'connected',
+      onlineUsers: userConnections.size
+    });
+  } catch (err) {
+    res.status(503).json({ 
+      status: 'error',
+      timestamp: new Date(),
+      uptime: process.uptime(),
+      mongodb: 'disconnected',
+      error: err.message
+    });
+  }
+});
+
 // WebSocket handling
 wss.on('connection', (ws) => {
   let currentUser = null;
