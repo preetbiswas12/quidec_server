@@ -307,26 +307,44 @@ function broadcastTypingStatus(from, to, typing) {
   }
 }
 
-function handleFriendRequest(from, to) {
-  // Store pending request in MongoDB
-  friendRequestsCollection.updateOne(
-    { toUser: to },
-    { $addToSet: { requests: from } },
-    { upsert: true }
-  ).catch(err => {
-    console.error('Error saving friend request:', err);
-  });
+async function handleFriendRequest(from, to) {
+  try {
+    // 'to' might be an 8-digit ID, try to resolve it to username
+    let toUsername = to;
+    
+    // Check if 'to' looks like an ID (8 digits)
+    if (/^\d{8}$/.test(to)) {
+      const user = await usersCollection.findOne({ userId: to });
+      if (!user) {
+        console.log(`User ID ${to} not found`);
+        return;
+      }
+      toUsername = user.username;
+    }
 
-  const toUser = userConnections.get(to);
-  if (toUser) {
-    toUser.send(JSON.stringify({
-      type: 'friend-request',
-      from,
-      timestamp: new Date(),
-    }));
+    // Store pending request in MongoDB (using resolved username)
+    friendRequestsCollection.updateOne(
+      { toUser: toUsername },
+      { $addToSet: { requests: from } },
+      { upsert: true }
+    ).catch(err => {
+      console.error('Error saving friend request:', err);
+    });
+
+    // Send to recipient if online
+    const toUserConn = userConnections.get(toUsername);
+    if (toUserConn) {
+      toUserConn.send(JSON.stringify({
+        type: 'friend-request',
+        from,
+        timestamp: new Date(),
+      }));
+    }
+
+    console.log(`Friend request from ${from} to ${toUsername} (ID: ${to})`);
+  } catch (err) {
+    console.error('Error in handleFriendRequest:', err);
   }
-
-  console.log(`Friend request from ${from} to ${to}`);
 }
 
 function handleFriendResponse(from, to, accept) {
