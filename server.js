@@ -57,6 +57,11 @@ app.use(cors());
 app.use(express.json());
 
 // Routes
+// Generate unique 8-digit ID
+function generateUniqueId() {
+  return Math.floor(10000000 + Math.random() * 90000000).toString();
+}
+
 app.post('/api/register', async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -71,20 +76,24 @@ app.post('/api/register', async (req, res) => {
     }
 
     const hashedPassword = await bcryptjs.hash(password, 10);
+    const userId = generateUniqueId();
+    
     await usersCollection.insertOne({
       username,
       password: hashedPassword,
+      userId,
       createdAt: new Date(),
     });
 
     // Initialize empty friends array
     await friendshipsCollection.insertOne({
       username,
+      userId,
       friends: [],
     });
 
-    const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: '24h' });
-    res.json({ token, username });
+    const token = jwt.sign({ username, userId }, JWT_SECRET, { expiresIn: '24h' });
+    res.json({ token, username, userId });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
@@ -100,16 +109,16 @@ app.post('/api/login', async (req, res) => {
 
     const user = await usersCollection.findOne({ username });
     if (!user) {
-      return res.status(401).json({ error: 'Invalid credentials' });
+      return res.status(401).json({ error: 'User not found', userNotFound: true });
     }
 
     const validPassword = await bcryptjs.compare(password, user.password);
     if (!validPassword) {
-      return res.status(401).json({ error: 'Invalid credentials' });
+      return res.status(401).json({ error: 'Invalid password' });
     }
 
-    const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: '24h' });
-    res.json({ token, username });
+    const token = jwt.sign({ username, userId: user.userId }, JWT_SECRET, { expiresIn: '24h' });
+    res.json({ token, username, userId: user.userId });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
@@ -119,19 +128,26 @@ app.get('/api/users/:username', async (req, res) => {
   try {
     const { username } = req.params;
     const user = await usersCollection.findOne({ username });
-
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+    if (user) {
+      res.json({ username: user.username, userId: user.userId });
+    } else {
+      res.status(404).json({ error: 'User not found' });
     }
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
 
-    const isOnline = userConnections.has(username);
-    const lastSeenTime = lastSeen.get(username) || user.createdAt;
-
-    res.json({
-      username,
-      online: isOnline,
-      lastSeen: lastSeenTime,
-    });
+// Get user by ID
+app.get('/api/users-by-id/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const user = await usersCollection.findOne({ userId });
+    if (user) {
+      res.json({ username: user.username, userId: user.userId, isOnline: userConnections.has(user.username) });
+    } else {
+      res.status(404).json({ error: 'User not found' });
+    }
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
