@@ -239,6 +239,24 @@ app.get('/api/friend-requests/outgoing/:username', async (req, res) => {
   }
 });
 
+app.get('/api/friends/:username', async (req, res) => {
+  try {
+    const { username } = req.params;
+    const userFriends = await friendshipsCollection.findOne({ username });
+    const friends = userFriends?.friends || [];
+    
+    const friendsData = friends.map((friend) => ({
+      username: friend,
+      online: userConnections.has(friend),
+      lastSeen: lastSeen.get(friend) || new Date(),
+    }));
+    
+    res.json({ friends: friendsData, count: friendsData.length });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Migrate old string requests to new object format
 app.post('/api/debug/migrate-requests', async (req, res) => {
   try {
