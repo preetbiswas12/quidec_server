@@ -163,6 +163,32 @@ app.get('/api/debug/friend-requests', async (req, res) => {
   }
 });
 
+// Debug: Get all users
+app.get('/api/debug/users', async (req, res) => {
+  try {
+    const allUsers = await usersCollection.find({}).project({username: 1, userId: 1}).toArray();
+    res.json({ users: allUsers });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Debug: Get database state
+app.get('/api/debug/state', async (req, res) => {
+  try {
+    const allUsers = await usersCollection.find({}).project({username: 1, userId: 1}).toArray();
+    const allRequests = await friendRequestsCollection.find({}).toArray();
+    const onlineUsers = Array.from(userConnections.keys());
+    res.json({ 
+      users: allUsers,
+      friendRequests: allRequests,
+      onlineUsers: onlineUsers
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.get('/api/online-users', (req, res) => {
   const onlineUsers = Array.from(userConnections.keys());
   res.json({ onlineUsers });
@@ -225,11 +251,15 @@ wss.on('connection', (ws) => {
           break;
 
         case 'friend-request':
-          handleFriendRequest(message.from, message.to);
+          handleFriendRequest(message.from, message.to, ws);
           break;
 
         case 'friend-response':
-          handleFriendResponse(message.from, message.to, message.accept);
+          handleFriendResponse(message.from, message.to, message.accept, ws);
+          break;
+
+        case 'cancel-friend-request':
+          handleCancelFriendRequest(message.from, message.to, ws);
           break;
 
         case 'get-friends':
@@ -341,97 +371,241 @@ function broadcastTypingStatus(from, to, typing) {
 
 async function handleFriendRequest(from, to) {
   try {
+    console.log(`\n=== FRIEND REQUEST FLOW ===`);
+    console.log(`FROM: ${from}`);
+    console.log(`TO (received): ${to}`);
+    
+    // Validate sender exists
+    const senderUser = await usersCollection.findOne({ username: from });
+    if (!senderUser) {
+      console.log(`❌ Sender ${from} not found`);
+      ws.send(JSON.stringify({ type: 'error', message: 'User not found' }));
+      return;
+    }
+    
     // 'to' might be an 8-digit ID, try to resolve it to username
     let toUsername = to;
     
     // Check if 'to' looks like an ID (8 digits)
     if (/^\d{8}$/.test(to)) {
+      console.log(`✓ "${to}" looks like an 8-digit ID`);
       const user = await usersCollection.findOne({ userId: to });
       if (!user) {
         console.log(`❌ User ID ${to} not found`);
+        ws.send(JSON.stringify({ type: 'error', message: `User with ID ${to} not found` }));
         return;
       }
       toUsername = user.username;
       console.log(`✓ Resolved ID ${to} to username: ${toUsername}`);
     }
+    
+    // Prevent self-requests
+    if (from === toUsername) {
+      console.log(`❌ Cannot send friend request to yourself`);
+      ws.send(JSON.stringify({ type: 'error', message: 'Cannot send request to yourself' }));
+      return;
+    }
+    
+    // Check if already friends
+    const friendship = await friendshipsCollection.findOne({ username: from });
+    if (friendship?.friends?.includes(toUsername)) {
+      console.log(`❌ Already friends with ${toUsername}`);
+      ws.send(JSON.stringify({ type: 'error', message: 'Already friends with this user' }));
+      return;
+    }
+    
+    // Check if request already exists
+    const existingRequest = await friendRequestsCollection.findOne({ toUser: toUsername, 'requests.sender': from });
+    if (existingRequest) {
+      console.log(`❌ Request already sent to ${toUsername}`);
+      ws.send(JSON.stringify({ type: 'error', message: 'Request already sent' }));
+      return;
+    }
 
-    // Store pending request in MongoDB (using resolved username)
-    await friendRequestsCollection.updateOne(
+    const timestamp = new Date();
+    
+    // Store request with full details (Discord-like structure)
+    const result = await friendRequestsCollection.updateOne(
       { toUser: toUsername },
-      { $addToSet: { requests: from } },
+      { $push: { requests: { sender: from, sentAt: timestamp } } },
       { upsert: true }
     );
-    console.log(`✓ Stored friend request in DB: ${from} → ${toUsername}`);
+    
+    console.log(`✓ Stored request in DB`);
+    console.log(`  DB operation:`, {matched: result.matchedCount, modified: result.modifiedCount, upserted: result.upsertedId});
+
+    // Verify it was stored
+    const stored = await friendRequestsCollection.findOne({ toUser: toUsername });
+    console.log(`✓ Verified in DB:`, stored);
+
+    // Notify sender
+    ws.send(JSON.stringify({
+      type: 'request-sent',
+      to: toUsername,
+      status: 'pending',
+      sentAt: timestamp,
+      message: `Friend request sent to ${toUsername}`,
+    }));
+    console.log(`✓ Notified sender: ${from}`);
 
     // Send to recipient if online
     const toUserConn = userConnections.get(toUsername);
     if (toUserConn && toUserConn.readyState === 1) {
       toUserConn.send(JSON.stringify({
-        type: 'friend-request',
+        type: 'incoming-request',
         from,
-        timestamp: new Date(),
+        fromId: senderUser.userId,
+        sentAt: timestamp,
       }));
-      console.log(`✓ Sent friend-request message to online user: ${toUsername}`);
+      console.log(`✓ Notified recipient: ${toUsername}`);
     } else {
-      console.log(`⚠ Recipient ${toUsername} is not online (will see on next login)`);
+      console.log(`⚠ Recipient ${toUsername} is offline (will see on next login)`);
     }
 
-    console.log(`✅ Friend request from ${from} to ${toUsername} (ID: ${to})`);
+    console.log(`✅ Friend request from ${from} to ${toUsername}\n`);
   } catch (err) {
-    console.error('❌ Error in handleFriendRequest:', err);
+    console.error(`❌ Error in handleFriendRequest:`, err);
+    ws.send(JSON.stringify({ type: 'error', message: 'Failed to send request' }));
   }
 }
 
-function handleFriendResponse(from, to, accept) {
-  // Remove from pending requests
-  friendRequestsCollection.updateOne(
-    { toUser: from },
-    { $pull: { requests: to } }
-  ).catch(err => {
-    console.error('Error removing friend request:', err);
-  });
-
-  if (accept) {
-    // Add to friends in MongoDB
-    friendshipsCollection.updateOne(
-      { username: from },
-      { $addToSet: { friends: to } },
-      { upsert: true }
-    ).catch(err => {
-      console.error('Error adding friend:', err);
+function handleFriendResponse(from, to, accept, ws) {
+  try {
+    console.log(`\n=== FRIEND RESPONSE ===`);
+    console.log(`Recipient: ${from}, Sender: ${to}, Accept: ${accept}`);
+    
+    // Remove from pending requests
+    friendRequestsCollection.updateOne(
+      { toUser: from },
+      { $pull: { 'requests': { sender: to } } }
+    ).then(removeResult => {
+      console.log(`✓ Removed request from pending:`, {matched: removeResult.matchedCount, modified: removeResult.modifiedCount});
+    }).catch(err => {
+      console.error('Error removing friend request:', err);
     });
 
-    friendshipsCollection.updateOne(
-      { username: to },
-      { $addToSet: { friends: from } },
-      { upsert: true }
-    ).catch(err => {
-      console.error('Error adding friend:', err);
-    });
+    if (accept) {
+      console.log(`✓ Request accepted - adding to friends`);
+      
+      // Add to friends in MongoDB (both directions)
+      friendshipsCollection.updateOne(
+        { username: from },
+        { $addToSet: { friends: to } },
+        { upsert: true }
+      ).catch(err => {
+        console.error('Error adding friend:', err);
+      });
 
-    // Notify both users
-    const fromUser = userConnections.get(from);
-    const toUser = userConnections.get(to);
+      friendshipsCollection.updateOne(
+        { username: to },
+        { $addToSet: { friends: from } },
+        { upsert: true }
+      ).catch(err => {
+        console.error('Error adding friend:', err);
+      });
 
-    if (toUser) {
-      toUser.send(JSON.stringify({
-        type: 'friend-request-response',
+      // Notify both users
+      const fromUser = userConnections.get(from);
+      const toUser = userConnections.get(to);
+
+      const responseMessage = JSON.stringify({
+        type: 'friend-added',
+        friendUsername: to,
+        status: 'accepted',
+        addedAt: new Date(),
+      });
+
+      if (fromUser) {
+        fromUser.send(responseMessage);
+        console.log(`✓ Notified ${from}: friendship accepted`);
+      }
+
+      if (toUser) {
+        toUser.send(JSON.stringify({
+          type: 'friend-added',
+          friendUsername: from,
+          status: 'accepted',
+          addedAt: new Date(),
+        }));
+        console.log(`✓ Notified ${to}: friendship accepted`);
+      }
+
+      console.log(`✅ ${from} and ${to} are now friends\n`);
+    } else {
+      console.log(`✓ Request declined`);
+      
+      // Notify sender that request was declined
+      const toUser = userConnections.get(to);
+      if (toUser) {
+        toUser.send(JSON.stringify({
+          type: 'request-declined',
+          declinedBy: from,
+          declinedAt: new Date(),
+        }));
+        console.log(`✓ Notified ${to}: request declined by ${from}`);
+      }
+
+      console.log(`✅ ${from} declined friend request from ${to}\n`);
+    }
+  } catch (err) {
+    console.error('❌ Error in handleFriendResponse:', err);
+    ws.send(JSON.stringify({ type: 'error', message: 'Failed to respond to request' }));
+  }
+}
+
+async function handleCancelFriendRequest(from, to, ws) {
+  try {
+    console.log(`\n=== CANCEL FRIEND REQUEST ===`);
+    console.log(`Sender: ${from}, Target: ${to}`);
+    
+    // Resolve ID to username if needed
+    let toUsername = to;
+    if (/^\d{8}$/.test(to)) {
+      const user = await usersCollection.findOne({ userId: to });
+      if (!user) {
+        ws.send(JSON.stringify({ type: 'error', message: 'User not found' }));
+        return;
+      }
+      toUsername = user.username;
+    }
+    
+    // Remove the pending request
+    const result = await friendRequestsCollection.updateOne(
+      { toUser: toUsername },
+      { $pull: { 'requests': { sender: from } } }
+    );
+    
+    if (result.modifiedCount === 0) {
+      console.log(`❌ No pending request found`);
+      ws.send(JSON.stringify({ type: 'error', message: 'No pending request to cancel' }));
+      return;
+    }
+    
+    console.log(`✓ Request cancelled`);
+    
+    // Notify sender
+    ws.send(JSON.stringify({
+      type: 'request-cancelled',
+      to: toUsername,
+      cancelledAt: new Date(),
+      message: `Friend request to ${toUsername} cancelled`,
+    }));
+    
+    // Notify recipient if online
+    const toUserConn = userConnections.get(toUsername);
+    if (toUserConn && toUserConn.readyState === 1) {
+      toUserConn.send(JSON.stringify({
+        type: 'request-cancelled-notification',
         from,
-        accepted: true,
+        cancelledAt: new Date(),
       }));
+      console.log(`✓ Notified ${toUsername}: request cancelled by ${from}`);
     }
-
-    if (fromUser) {
-      fromUser.send(JSON.stringify({
-        type: 'friend-request-response',
-        from: to,
-        accepted: true,
-      }));
-    }
-
-    console.log(`${from} and ${to} are now friends`);
-  } else {
-    console.log(`${to} declined friend request from ${from}`);
+    
+    console.log(`✅ Request cancelled: ${from} → ${toUsername}\n`);
+  } catch (err) {
+    console.error('❌ Error in handleCancelFriendRequest:', err);
+    ws.send(JSON.stringify({ type: 'error', message: 'Failed to cancel request' }));
   }
 }
 
@@ -496,23 +670,30 @@ function sendOnlineUsers(ws) {
 
 async function sendPendingRequests(username, ws) {
   try {
+    console.log(`\n=== SEND INCOMING REQUESTS FOR: ${username} ===`);
+    
     const requestsDoc = await friendRequestsCollection.findOne({ toUser: username });
-    const requests = requestsDoc?.requests || [];
+    console.log(`Query: {toUser: "${username}"}`);
+    console.log(`Result:`, requestsDoc);
+    
+    // Format requests like Discord - include sender and timestamp
+    const requests = (requestsDoc?.requests || []).map(req => ({
+      sender: typeof req === 'string' ? req : req.sender,
+      sentAt: req.sentAt || new Date(),
+    }));
     
     console.log(`📥 Sending incoming requests to ${username}:`, requests);
-    console.log(`   Request doc from DB:`, requestsDoc);
     
     const message = JSON.stringify({
       type: 'pending-requests',
       requests: requests,
+      count: requests.length,
     });
     
-    console.log(`   Message to send:`, message);
-    console.log(`   WebSocket readyState:`, ws.readyState, `(1=OPEN)`);
-    
+    console.log(`WebSocket readyState: ${ws.readyState} (1=OPEN, 2=CLOSING, 3=CLOSED)`);
     ws.send(message);
     
-    console.log(`   ✅ Sent to client:`, { type: 'pending-requests', requests });
+    console.log(`✅ Sent to client: ${message}\n`);
   } catch (err) {
     console.error('Error getting pending requests:', err);
   }
@@ -520,17 +701,36 @@ async function sendPendingRequests(username, ws) {
 
 async function sendOutgoingRequests(username, ws) {
   try {
-    // Find all documents where this user sent requests (their username is in the requests array)
-    const sentTo = await friendRequestsCollection.find({ requests: username }).toArray();
+    console.log(`\n=== SEND OUTGOING REQUESTS FROM: ${username} ===`);
     
-    // Extract the usernames of people this user sent requests to
-    const outgoing = sentTo.map(doc => doc.toUser);
+    // Find all documents where this user sent requests (their username is in the requests.sender field)
+    const query = { 'requests.sender': username };
+    console.log(`Query: ${JSON.stringify(query)}`);
+    
+    const sentTo = await friendRequestsCollection.find(query).toArray();
+    console.log(`Found documents:`, sentTo);
+    
+    // Extract outgoing requests with timestamps
+    const outgoing = sentTo.map(doc => {
+      const request = doc.requests.find(r => r.sender === username);
+      return {
+        recipient: doc.toUser,
+        sentAt: request?.sentAt || new Date(),
+      };
+    });
     
     console.log(`📤 Sending outgoing requests from ${username}:`, outgoing);
-    ws.send(JSON.stringify({
+    
+    const message = JSON.stringify({
       type: 'outgoing-requests',
       outgoing: outgoing,
-    }));
+      count: outgoing.length,
+    });
+    
+    console.log(`WebSocket readyState: ${ws.readyState} (1=OPEN, 2=CLOSING, 3=CLOSED)`);
+    ws.send(message);
+    
+    console.log(`✅ Sent to client: ${message}\n`);
   } catch (err) {
     console.error('Error getting outgoing requests:', err);
   }
