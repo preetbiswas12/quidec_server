@@ -196,6 +196,8 @@ wss.on('connection', (ws) => {
           userConnections.set(currentUser, ws);
           lastSeen.set(currentUser, new Date());
           broadcastUserStatus(currentUser, true);
+          // Send pending friend requests immediately on auth
+          sendPendingRequests(currentUser, ws);
           break;
 
         case 'message':
