@@ -206,13 +206,7 @@ wss.on('connection', (ws) => {
           userConnections.set(currentUser, ws);
           lastSeen.set(currentUser, new Date());
           broadcastUserStatus(currentUser, true);
-          
-          // Send incoming and outgoing friend requests after a small delay
-          // to ensure client is ready to receive messages
-          setTimeout(() => {
-            sendPendingRequests(currentUser, ws);
-            sendOutgoingRequests(currentUser, ws);
-          }, 100);
+          console.log(`✅ User ${currentUser} authenticated`);
           break;
 
         case 'message':
@@ -582,6 +576,7 @@ function broadcastUserStatus(username, online) {
 
 server.listen(PORT, () => {
   console.log(`🚀 Free Cluely Server running on http://localhost:${PORT}`);
+  console.log(`🔧 Version: ${new Date().toISOString()}`);
 });
 
 // Connect to MongoDB on startup
