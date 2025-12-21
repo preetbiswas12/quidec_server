@@ -426,6 +426,44 @@ app.get('/api/messages/unread/:username', async (req, res) => {
   }
 });
 
+// Clear chat history (HTTP endpoint)
+app.post('/api/messages/clear', async (req, res) => {
+  try {
+    const { username, withUser } = req.body;
+    
+    if (!username || !withUser) {
+      return res.status(400).json({ error: 'username and withUser required' });
+    }
+    
+    const conversationKey = [username, withUser].sort().join('-');
+    
+    // Delete all messages in this conversation from MongoDB
+    const result = await chatHistoryCollection.deleteMany({ conversationKey });
+    
+    console.log(`🗑️ Cleared chat between ${username} and ${withUser}: deleted ${result.deletedCount} messages`);
+    
+    // Try to notify the other user via WebSocket if online
+    const otherUser = userConnections.get(withUser);
+    if (otherUser && otherUser.readyState === WebSocket.OPEN) {
+      otherUser.send(JSON.stringify({
+        type: 'clear-chat',
+        from: username,
+        to: withUser,
+      }));
+      console.log(`✓ WebSocket: Notified ${withUser} about cleared chat`);
+    }
+    
+    res.json({ 
+      success: true, 
+      deletedCount: result.deletedCount,
+      message: `Cleared ${result.deletedCount} messages from chat with ${withUser}`
+    });
+  } catch (err) {
+    console.error('Error clearing chat:', err);
+    res.status(500).json({ error: 'Failed to clear chat' });
+  }
+});
+
 // Health check endpoint for Render
 app.get('/health', async (req, res) => {
   try {
