@@ -292,6 +292,140 @@ app.get('/api/online-users', (req, res) => {
   res.json({ onlineUsers });
 });
 
+// Message HTTP endpoints (fallback for WebSocket issues on Render)
+app.post('/api/messages/send', async (req, res) => {
+  try {
+    const { from, to, content } = req.body;
+    
+    if (!from || !to || !content) {
+      return res.status(400).json({ error: 'from, to, and content required' });
+    }
+    
+    const conversationKey = [from, to].sort().join('-');
+    const messageObj = {
+      conversationKey,
+      from,
+      to,
+      content,
+      timestamp: new Date(),
+      read: false,
+      readAt: null,
+    };
+    
+    // Save to MongoDB
+    const result = await chatHistoryCollection.insertOne(messageObj);
+    
+    console.log(`💬 Message saved: ${from} → ${to}`);
+    
+    // Try to send via WebSocket if recipient is online
+    const toUser = userConnections.get(to);
+    if (toUser && toUser.readyState === WebSocket.OPEN) {
+      toUser.send(JSON.stringify({
+        type: 'message',
+        from,
+        content,
+        timestamp: messageObj.timestamp,
+        read: false,
+        messageId: result.insertedId?.toString(),
+      }));
+      console.log(`✓ WebSocket: Sent to ${to}`);
+    } else {
+      console.log(`⚠ ${to} is offline, message will be retrieved on next poll`);
+    }
+    
+    res.json({ 
+      success: true, 
+      messageId: result.insertedId?.toString(),
+      timestamp: messageObj.timestamp 
+    });
+  } catch (err) {
+    console.error('Error sending message:', err);
+    res.status(500).json({ error: 'Failed to send message' });
+  }
+});
+
+// Get messages for a conversation
+app.get('/api/messages/:username/:withUser', async (req, res) => {
+  try {
+    const { username, withUser } = req.params;
+    const conversationKey = [username, withUser].sort().join('-');
+    
+    const messages = await chatHistoryCollection
+      .find({ conversationKey })
+      .sort({ timestamp: 1 })
+      .toArray();
+    
+    console.log(`📬 Fetched ${messages.length} messages for ${username} ↔ ${withUser}`);
+    
+    res.json({ messages, count: messages.length });
+  } catch (err) {
+    console.error('Error fetching messages:', err);
+    res.status(500).json({ error: 'Failed to fetch messages' });
+  }
+});
+
+// Mark message as read
+app.post('/api/messages/read', async (req, res) => {
+  try {
+    const { messageId, readBy } = req.body;
+    
+    if (!messageId || !readBy) {
+      return res.status(400).json({ error: 'messageId and readBy required' });
+    }
+    
+    const { ObjectId } = require('mongodb');
+    const readTimestamp = new Date();
+    
+    // Update message status
+    const result = await chatHistoryCollection.updateOne(
+      { _id: new ObjectId(messageId) },
+      { $set: { read: true, readAt: readTimestamp, readBy } }
+    );
+    
+    if (result.modifiedCount > 0) {
+      console.log(`✓ Message ${messageId} marked as read by ${readBy}`);
+      
+      // Get the message to find sender
+      const message = await chatHistoryCollection.findOne({ _id: new ObjectId(messageId) });
+      if (message) {
+        // Try to notify sender via WebSocket
+        const senderConn = userConnections.get(message.from);
+        if (senderConn && senderConn.readyState === WebSocket.OPEN) {
+          senderConn.send(JSON.stringify({
+            type: 'read-receipt',
+            messageId: messageId,
+            readBy,
+            readAt: readTimestamp,
+          }));
+          console.log(`✓ WebSocket: Sent read receipt to ${message.from}`);
+        }
+      }
+    }
+    
+    res.json({ success: result.modifiedCount > 0 });
+  } catch (err) {
+    console.error('Error marking message as read:', err);
+    res.status(500).json({ error: 'Failed to mark as read' });
+  }
+});
+
+// Get unread messages for a user (for notifications)
+app.get('/api/messages/unread/:username', async (req, res) => {
+  try {
+    const { username } = req.params;
+    
+    const unreadMessages = await chatHistoryCollection
+      .find({ to: username, read: false })
+      .sort({ timestamp: -1 })
+      .toArray();
+    
+    res.json({ unreadMessages, count: unreadMessages.length });
+  } catch (err) {
+    console.error('Error fetching unread messages:', err);
+    res.status(500).json({ error: 'Failed to fetch unread messages' });
+  }
+});
+
 // Health check endpoint for Render
 app.get('/health', async (req, res) => {
   try {
