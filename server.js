@@ -124,6 +124,32 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
+// Admin: Reset entire database
+app.post('/api/admin/reset-db', async (req, res) => {
+  try {
+    console.log('🗑️ Database reset initiated...');
+    
+    // Delete all documents from collections
+    await usersCollection.deleteMany({});
+    await friendshipsCollection.deleteMany({});
+    await chatHistoryCollection.deleteMany({});
+    await friendRequestsCollection.deleteMany({});
+    
+    // Clear in-memory storage
+    userConnections.clear();
+    lastSeen.clear();
+    
+    console.log('✅ Database reset successfully');
+    res.json({ 
+      success: true, 
+      message: 'Database reset successfully - all users, friends, messages, and requests deleted' 
+    });
+  } catch (err) {
+    console.error('❌ Error resetting database:', err);
+    res.status(500).json({ error: 'Failed to reset database: ' + err.message });
+  }
+});
+
 app.get('/api/users/:username', async (req, res) => {
   try {
     const { username } = req.params;
