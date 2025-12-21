@@ -189,6 +189,36 @@ app.get('/api/debug/state', async (req, res) => {
   }
 });
 
+// Migrate old string requests to new object format
+app.post('/api/debug/migrate-requests', async (req, res) => {
+  try {
+    const allRequests = await friendRequestsCollection.find({}).toArray();
+    let migratedCount = 0;
+    
+    for (const doc of allRequests) {
+      const migratedRequests = doc.requests.map(req => {
+        if (typeof req === 'string') {
+          migratedCount++;
+          return { sender: req, sentAt: new Date() };
+        }
+        return req;
+      });
+      
+      await friendRequestsCollection.updateOne(
+        { _id: doc._id },
+        { $set: { requests: migratedRequests } }
+      );
+    }
+    
+    res.json({ 
+      message: `Migrated ${migratedCount} requests to new format`,
+      totalDocuments: allRequests.length
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.get('/api/online-users', (req, res) => {
   const onlineUsers = Array.from(userConnections.keys());
   res.json({ onlineUsers });
@@ -251,15 +281,15 @@ wss.on('connection', (ws) => {
           break;
 
         case 'friend-request':
-          handleFriendRequest(message.from, message.to, ws);
+          handleFriendRequest(message.from, message.to, ws, currentUser);
           break;
 
         case 'friend-response':
-          handleFriendResponse(message.from, message.to, message.accept, ws);
+          handleFriendResponse(message.from, message.to, message.accept, ws, currentUser);
           break;
 
         case 'cancel-friend-request':
-          handleCancelFriendRequest(message.from, message.to, ws);
+          handleCancelFriendRequest(message.from, message.to, ws, currentUser);
           break;
 
         case 'get-friends':
@@ -369,13 +399,19 @@ function broadcastTypingStatus(from, to, typing) {
   }
 }
 
-async function handleFriendRequest(from, to) {
+async function handleFriendRequest(from, to, ws, currentUser) {
   try {
     console.log(`\n=== FRIEND REQUEST FLOW ===`);
     console.log(`FROM: ${from}`);
     console.log(`TO (received): ${to}`);
     
-    // Validate sender exists
+    // Validate sender
+    if (!currentUser || currentUser !== from) {
+      console.log(`❌ Unauthorized: currentUser (${currentUser}) != from (${from})`);
+      ws.send(JSON.stringify({ type: 'error', message: 'Unauthorized' }));
+      return;
+    }
+    
     const senderUser = await usersCollection.findOne({ username: from });
     if (!senderUser) {
       console.log(`❌ Sender ${from} not found`);
@@ -423,11 +459,12 @@ async function handleFriendRequest(from, to) {
     }
 
     const timestamp = new Date();
+    const requestObj = { sender: from, sentAt: timestamp };
     
     // Store request with full details (Discord-like structure)
     const result = await friendRequestsCollection.updateOne(
       { toUser: toUsername },
-      { $push: { requests: { sender: from, sentAt: timestamp } } },
+      { $push: { requests: requestObj } },
       { upsert: true }
     );
     
@@ -461,16 +498,21 @@ async function handleFriendRequest(from, to) {
     } else {
       console.log(`⚠ Recipient ${toUsername} is offline (will see on next login)`);
     }
-
-    console.log(`✅ Friend request from ${from} to ${toUsername}\n`);
   } catch (err) {
     console.error(`❌ Error in handleFriendRequest:`, err);
     ws.send(JSON.stringify({ type: 'error', message: 'Failed to send request' }));
   }
 }
 
-function handleFriendResponse(from, to, accept, ws) {
+function handleFriendResponse(from, to, accept, ws, currentUser) {
   try {
+    // Validate authorization
+    if (!currentUser || currentUser !== from) {
+      console.log(`❌ Unauthorized: currentUser (${currentUser}) != from (${from})`);
+      ws.send(JSON.stringify({ type: 'error', message: 'Unauthorized' }));
+      return;
+    }
+    
     console.log(`\n=== FRIEND RESPONSE ===`);
     console.log(`Recipient: ${from}, Sender: ${to}, Accept: ${accept}`);
     
@@ -553,8 +595,15 @@ function handleFriendResponse(from, to, accept, ws) {
   }
 }
 
-async function handleCancelFriendRequest(from, to, ws) {
+async function handleCancelFriendRequest(from, to, ws, currentUser) {
   try {
+    // Validate authorization
+    if (!currentUser || currentUser !== from) {
+      console.log(`❌ Unauthorized: currentUser (${currentUser}) != from (${from})`);
+      ws.send(JSON.stringify({ type: 'error', message: 'Unauthorized' }));
+      return;
+    }
+    
     console.log(`\n=== CANCEL FRIEND REQUEST ===`);
     console.log(`Sender: ${from}, Target: ${to}`);
     
@@ -676,11 +725,17 @@ async function sendPendingRequests(username, ws) {
     console.log(`Query: {toUser: "${username}"}`);
     console.log(`Result:`, requestsDoc);
     
-    // Format requests like Discord - include sender and timestamp
-    const requests = (requestsDoc?.requests || []).map(req => ({
-      sender: typeof req === 'string' ? req : req.sender,
-      sentAt: req.sentAt || new Date(),
-    }));
+    // Normalize requests to consistent format (handle both old string format and new object format)
+    const requests = (requestsDoc?.requests || []).map(req => {
+      if (typeof req === 'string') {
+        // Legacy format: just username string
+        return { sender: req, sentAt: new Date() };
+      } else if (req.sender) {
+        // New Discord-like format: {sender, sentAt}
+        return { sender: req.sender, sentAt: req.sentAt || new Date() };
+      }
+      return req;
+    });
     
     console.log(`📥 Sending incoming requests to ${username}:`, requests);
     
@@ -703,19 +758,28 @@ async function sendOutgoingRequests(username, ws) {
   try {
     console.log(`\n=== SEND OUTGOING REQUESTS FROM: ${username} ===`);
     
-    // Find all documents where this user sent requests (their username is in the requests.sender field)
-    const query = { 'requests.sender': username };
-    console.log(`Query: ${JSON.stringify(query)}`);
+    // Find all documents where this user sent requests
+    // Handle both old format (string) and new format (object with sender field)
+    const sentTo = await friendRequestsCollection.find({
+      $or: [
+        { 'requests.sender': username },  // New object format
+        { 'requests': username }          // Old string format (backward compatibility)
+      ]
+    }).toArray();
     
-    const sentTo = await friendRequestsCollection.find(query).toArray();
-    console.log(`Found documents:`, sentTo);
+    console.log(`Found ${sentTo.length} documents with requests from ${username}`);
     
     // Extract outgoing requests with timestamps
     const outgoing = sentTo.map(doc => {
-      const request = doc.requests.find(r => r.sender === username);
+      // Find requests sent by this user (handle both formats)
+      const userRequest = doc.requests.find(r => {
+        if (typeof r === 'string') return r === username;
+        return r.sender === username;
+      });
+      
       return {
         recipient: doc.toUser,
-        sentAt: request?.sentAt || new Date(),
+        sentAt: (typeof userRequest === 'object' ? userRequest?.sentAt : null) || new Date(),
       };
     });
     
