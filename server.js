@@ -249,16 +249,18 @@ wss.on('connection', (ws) => {
           break;
 
         case 'get-pending':
+          console.log(`📨 get-pending received. currentUser:`, currentUser);
           if (!currentUser) {
-            console.log('⚠️ get-pending received before auth, ignoring');
+            console.log('❌ get-pending received BEFORE auth, ignoring');
             break;
           }
           sendPendingRequests(currentUser, ws);
           break;
 
         case 'get-outgoing':
+          console.log(`📨 get-outgoing received. currentUser:`, currentUser);
           if (!currentUser) {
-            console.log('⚠️ get-outgoing received before auth, ignoring');
+            console.log('❌ get-outgoing received BEFORE auth, ignoring');
             break;
           }
           sendOutgoingRequests(currentUser, ws);
@@ -499,10 +501,17 @@ async function sendPendingRequests(username, ws) {
     
     console.log(`📥 Sending incoming requests to ${username}:`, requests);
     console.log(`   Request doc from DB:`, requestsDoc);
-    ws.send(JSON.stringify({
+    
+    const message = JSON.stringify({
       type: 'pending-requests',
       requests: requests,
-    }));
+    });
+    
+    console.log(`   Message to send:`, message);
+    console.log(`   WebSocket readyState:`, ws.readyState, `(1=OPEN)`);
+    
+    ws.send(message);
+    
     console.log(`   ✅ Sent to client:`, { type: 'pending-requests', requests });
   } catch (err) {
     console.error('Error getting pending requests:', err);
