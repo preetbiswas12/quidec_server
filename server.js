@@ -153,6 +153,16 @@ app.get('/api/users-by-id/:userId', async (req, res) => {
   }
 });
 
+// Debug: Get all friend requests in database
+app.get('/api/debug/friend-requests', async (req, res) => {
+  try {
+    const allRequests = await friendRequestsCollection.find({}).toArray();
+    res.json({ friendRequests: allRequests });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.get('/api/online-users', (req, res) => {
   const onlineUsers = Array.from(userConnections.keys());
   res.json({ onlineUsers });
@@ -196,8 +206,9 @@ wss.on('connection', (ws) => {
           userConnections.set(currentUser, ws);
           lastSeen.set(currentUser, new Date());
           broadcastUserStatus(currentUser, true);
-          // Send pending friend requests immediately on auth
+          // Send incoming and outgoing friend requests immediately on auth
           sendPendingRequests(currentUser, ws);
+          sendOutgoingRequests(currentUser, ws);
           break;
 
         case 'message':
@@ -234,6 +245,10 @@ wss.on('connection', (ws) => {
 
         case 'get-pending':
           sendPendingRequests(currentUser, ws);
+          break;
+
+        case 'get-outgoing':
+          sendOutgoingRequests(currentUser, ws);
           break;
 
         case 'mark-read':
@@ -469,12 +484,33 @@ async function sendPendingRequests(username, ws) {
     const requestsDoc = await friendRequestsCollection.findOne({ toUser: username });
     const requests = requestsDoc?.requests || [];
     
+    console.log(`📥 Sending incoming requests to ${username}:`, requests);
+    console.log(`   Request doc from DB:`, requestsDoc);
     ws.send(JSON.stringify({
       type: 'pending-requests',
       requests: requests,
     }));
+    console.log(`   ✅ Sent to client:`, { type: 'pending-requests', requests });
   } catch (err) {
     console.error('Error getting pending requests:', err);
+  }
+}
+
+async function sendOutgoingRequests(username, ws) {
+  try {
+    // Find all documents where this user sent requests (their username is in the requests array)
+    const sentTo = await friendRequestsCollection.find({ requests: username }).toArray();
+    
+    // Extract the usernames of people this user sent requests to
+    const outgoing = sentTo.map(doc => doc.toUser);
+    
+    console.log(`📤 Sending outgoing requests from ${username}:`, outgoing);
+    ws.send(JSON.stringify({
+      type: 'outgoing-requests',
+      outgoing: outgoing,
+    }));
+  } catch (err) {
+    console.error('Error getting outgoing requests:', err);
   }
 }
 
