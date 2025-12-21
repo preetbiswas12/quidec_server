@@ -206,9 +206,13 @@ wss.on('connection', (ws) => {
           userConnections.set(currentUser, ws);
           lastSeen.set(currentUser, new Date());
           broadcastUserStatus(currentUser, true);
-          // Send incoming and outgoing friend requests immediately on auth
-          sendPendingRequests(currentUser, ws);
-          sendOutgoingRequests(currentUser, ws);
+          
+          // Send incoming and outgoing friend requests after a small delay
+          // to ensure client is ready to receive messages
+          setTimeout(() => {
+            sendPendingRequests(currentUser, ws);
+            sendOutgoingRequests(currentUser, ws);
+          }, 100);
           break;
 
         case 'message':
