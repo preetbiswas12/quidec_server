@@ -207,6 +207,13 @@ wss.on('connection', (ws) => {
           lastSeen.set(currentUser, new Date());
           broadcastUserStatus(currentUser, true);
           console.log(`✅ User ${currentUser} authenticated`);
+          
+          // Send pending and outgoing requests immediately after auth is set
+          // Use process.nextTick to ensure currentUser is set
+          process.nextTick(() => {
+            sendPendingRequests(currentUser, ws);
+            sendOutgoingRequests(currentUser, ws);
+          });
           break;
 
         case 'message':
@@ -242,10 +249,18 @@ wss.on('connection', (ws) => {
           break;
 
         case 'get-pending':
+          if (!currentUser) {
+            console.log('⚠️ get-pending received before auth, ignoring');
+            break;
+          }
           sendPendingRequests(currentUser, ws);
           break;
 
         case 'get-outgoing':
+          if (!currentUser) {
+            console.log('⚠️ get-outgoing received before auth, ignoring');
+            break;
+          }
           sendOutgoingRequests(currentUser, ws);
           break;
 
