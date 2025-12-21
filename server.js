@@ -189,6 +189,56 @@ app.get('/api/debug/state', async (req, res) => {
   }
 });
 
+// REST API endpoints for friend requests (HTTP fallback for WebSocket issues)
+app.get('/api/friend-requests/incoming/:username', async (req, res) => {
+  try {
+    const { username } = req.params;
+    const requestsDoc = await friendRequestsCollection.findOne({ toUser: username });
+    
+    const requests = (requestsDoc?.requests || []).map(req => {
+      if (typeof req === 'string') {
+        return { sender: req, sentAt: new Date() };
+      } else if (req.sender) {
+        return { sender: req.sender, sentAt: req.sentAt || new Date() };
+      }
+      return req;
+    });
+    
+    res.json({ requests, count: requests.length });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/friend-requests/outgoing/:username', async (req, res) => {
+  try {
+    const { username } = req.params;
+    
+    const sentTo = await friendRequestsCollection.find({
+      $or: [
+        { 'requests.sender': username },
+        { 'requests': username }
+      ]
+    }).toArray();
+    
+    const outgoing = sentTo.map(doc => {
+      const userRequest = doc.requests.find(r => {
+        if (typeof r === 'string') return r === username;
+        return r.sender === username;
+      });
+      
+      return {
+        recipient: doc.toUser,
+        sentAt: (typeof userRequest === 'object' ? userRequest?.sentAt : null) || new Date(),
+      };
+    });
+    
+    res.json({ outgoing, count: outgoing.length });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Migrate old string requests to new object format
 app.post('/api/debug/migrate-requests', async (req, res) => {
   try {
