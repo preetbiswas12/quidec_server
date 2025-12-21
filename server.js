@@ -316,34 +316,37 @@ async function handleFriendRequest(from, to) {
     if (/^\d{8}$/.test(to)) {
       const user = await usersCollection.findOne({ userId: to });
       if (!user) {
-        console.log(`User ID ${to} not found`);
+        console.log(`❌ User ID ${to} not found`);
         return;
       }
       toUsername = user.username;
+      console.log(`✓ Resolved ID ${to} to username: ${toUsername}`);
     }
 
     // Store pending request in MongoDB (using resolved username)
-    friendRequestsCollection.updateOne(
+    await friendRequestsCollection.updateOne(
       { toUser: toUsername },
       { $addToSet: { requests: from } },
       { upsert: true }
-    ).catch(err => {
-      console.error('Error saving friend request:', err);
-    });
+    );
+    console.log(`✓ Stored friend request in DB: ${from} → ${toUsername}`);
 
     // Send to recipient if online
     const toUserConn = userConnections.get(toUsername);
-    if (toUserConn) {
+    if (toUserConn && toUserConn.readyState === 1) {
       toUserConn.send(JSON.stringify({
         type: 'friend-request',
         from,
         timestamp: new Date(),
       }));
+      console.log(`✓ Sent friend-request message to online user: ${toUsername}`);
+    } else {
+      console.log(`⚠ Recipient ${toUsername} is not online (will see on next login)`);
     }
 
-    console.log(`Friend request from ${from} to ${toUsername} (ID: ${to})`);
+    console.log(`✅ Friend request from ${from} to ${toUsername} (ID: ${to})`);
   } catch (err) {
-    console.error('Error in handleFriendRequest:', err);
+    console.error('❌ Error in handleFriendRequest:', err);
   }
 }
 
