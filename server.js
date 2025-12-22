@@ -704,6 +704,12 @@ wss.on('connection', (ws) => {
           handleMarkRead(message.messageId, message.to);
           break;
 
+        case 'window-visibility':
+          // Broadcast window visibility status to all connected users
+          console.log(`👁️ Window visibility update from ${message.from}:`, message.visible ? 'shown' : 'hidden');
+          broadcastWindowVisibility(message.from, message.visible, message.timestamp);
+          break;
+
         default:
           console.log('Unknown message type:', message.type);
       }
@@ -1231,6 +1237,22 @@ function broadcastUserStatus(username, online) {
     timestamp: new Date(),
   });
 
+  wss.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  });
+}
+
+function broadcastWindowVisibility(username, visible, timestamp) {
+  const message = JSON.stringify({
+    type: 'window-visibility',
+    username,
+    visible,
+    timestamp: timestamp || new Date(),
+  });
+
+  console.log(`📢 Broadcasting window visibility to all clients:`, { username, visible });
   wss.clients.forEach((client) => {
     if (client.readyState === WebSocket.OPEN) {
       client.send(message);
