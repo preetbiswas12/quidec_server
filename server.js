@@ -283,6 +283,112 @@ app.get('/api/friends/:username', async (req, res) => {
   }
 });
 
+// POST endpoint to send friend request (HTTP - for Electron app)
+app.post('/api/friend-requests/send', async (req, res) => {
+  try {
+    console.log('\n========== 📤 FRIEND REQUEST (HTTP POST) ==========');
+    const { from, to, toUserId } = req.body;
+    
+    console.log('Request body:', { from, to, toUserId });
+
+    if (!from) {
+      return res.status(400).json({ error: 'Missing "from" field' });
+    }
+
+    if (!to && !toUserId) {
+      return res.status(400).json({ error: 'Missing "to" or "toUserId" field' });
+    }
+
+    // Use the input (either 'to' for username or 'toUserId' for 8-digit ID)
+    const input = to || toUserId;
+    console.log(`✅ Input: "${input}" (type: ${toUserId ? '8-digit ID' : 'username'})`);
+
+    // Validate sender exists
+    const senderUser = await usersCollection.findOne({ username: from });
+    if (!senderUser) {
+      console.log(`❌ Sender ${from} not found`);
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    console.log(`✅ Sender ${from} found`);
+
+    // Resolve 8-digit ID to username if needed
+    let toUsername = input;
+    if (toUserId) {
+      console.log(`🔍 Resolving 8-digit ID: ${toUserId}`);
+      const recipientUser = await usersCollection.findOne({ userId: toUserId });
+      if (!recipientUser) {
+        console.log(`❌ User with ID ${toUserId} not found`);
+        return res.status(404).json({ error: `User with ID ${toUserId} not found` });
+      }
+      toUsername = recipientUser.username;
+      console.log(`✅ Resolved ID to username: ${toUsername}`);
+    }
+
+    // Prevent self-requests
+    if (from === toUsername) {
+      console.log(`❌ Cannot send request to yourself`);
+      return res.status(400).json({ error: 'Cannot send request to yourself' });
+    }
+
+    // Check if already friends
+    const friendship = await friendshipsCollection.findOne({ username: from });
+    if (friendship?.friends?.includes(toUsername)) {
+      console.log(`❌ Already friends with ${toUsername}`);
+      return res.status(400).json({ error: 'Already friends with this user' });
+    }
+
+    console.log(`✅ Not already friends`);
+
+    // Check if request already exists
+    const existingRequest = await friendRequestsCollection.findOne({
+      toUser: toUsername,
+      'requests.sender': from,
+    });
+
+    if (existingRequest) {
+      console.log(`❌ Request already exists from ${from} to ${toUsername}`);
+      return res.status(400).json({ error: 'Request already sent' });
+    }
+
+    // Create the request
+    console.log(`📝 Creating friend request from ${from} to ${toUsername}`);
+    const result = await friendRequestsCollection.updateOne(
+      { toUser: toUsername },
+      {
+        $push: {
+          requests: {
+            sender: from,
+            sentAt: new Date(),
+          },
+        },
+      },
+      { upsert: true }
+    );
+
+    console.log(`✅ Request created. Modified count:`, result.modifiedCount || result.upsertedCount);
+
+    // Notify recipient if online
+    const recipientWs = userConnections.get(toUsername);
+    if (recipientWs && recipientWs.readyState === WebSocket.OPEN) {
+      console.log(`📢 Recipient ${toUsername} is online, sending notification...`);
+      recipientWs.send(JSON.stringify({
+        type: 'friend-request-incoming',
+        from,
+      }));
+      console.log(`✅ Notification sent`);
+    } else {
+      console.log(`⚠️ Recipient ${toUsername} is offline`);
+    }
+
+    console.log('========== ✅ SUCCESS ==========\n');
+    res.json({ success: true, message: 'Friend request sent' });
+  } catch (err) {
+    console.error('❌ Error:', err.message);
+    res.status(500).json({ error: 'Server error: ' + err.message });
+  }
+});
+
 // Migrate old string requests to new object format
 app.post('/api/debug/migrate-requests', async (req, res) => {
   try {
@@ -547,7 +653,9 @@ wss.on('connection', (ws) => {
           break;
 
         case 'friend-request':
-          handleFriendRequest(message.from, message.to, ws, currentUser);
+          // Handle both 'to' (username) and 'toUserId' (8-digit ID)
+          const recipientInput = message.to || message.toUserId;
+          handleFriendRequest(message.from, recipientInput, ws, currentUser);
           break;
 
         case 'friend-response':
@@ -667,7 +775,7 @@ function broadcastTypingStatus(from, to, typing) {
 
 async function handleFriendRequest(from, to, ws, currentUser) {
   try {
-    console.log(`\n=== FRIEND REQUEST FLOW ===`);
+    console.log(`\n========== 📤 FRIEND REQUEST (WebSocket) ==========`);
     console.log(`FROM: ${from}`);
     console.log(`TO (received): ${to}`);
     
@@ -690,7 +798,7 @@ async function handleFriendRequest(from, to, ws, currentUser) {
     
     // Check if 'to' looks like an ID (8 digits)
     if (/^\d{8}$/.test(to)) {
-      console.log(`✓ "${to}" looks like an 8-digit ID`);
+      console.log(`🔍 Resolving 8-digit ID: ${to}`);
       const user = await usersCollection.findOne({ userId: to });
       if (!user) {
         console.log(`❌ User ID ${to} not found`);
@@ -698,7 +806,9 @@ async function handleFriendRequest(from, to, ws, currentUser) {
         return;
       }
       toUsername = user.username;
-      console.log(`✓ Resolved ID ${to} to username: ${toUsername}`);
+      console.log(`✅ Resolved ID ${to} → username: ${toUsername}`);
+    } else {
+      console.log(`📝 Input is username: ${to}`);
     }
     
     // Prevent self-requests
@@ -715,6 +825,8 @@ async function handleFriendRequest(from, to, ws, currentUser) {
       ws.send(JSON.stringify({ type: 'error', message: 'Already friends with this user' }));
       return;
     }
+
+    console.log(`✅ Ready to send request to ${toUsername}`);
     
     // Check if request already exists
     const existingRequest = await friendRequestsCollection.findOne({ toUser: toUsername, 'requests.sender': from });
@@ -727,19 +839,15 @@ async function handleFriendRequest(from, to, ws, currentUser) {
     const timestamp = new Date();
     const requestObj = { sender: from, sentAt: timestamp };
     
-    // Store request with full details (Discord-like structure)
+    // Store request with full details
+    console.log(`💾 Saving to database...`);
     const result = await friendRequestsCollection.updateOne(
       { toUser: toUsername },
       { $push: { requests: requestObj } },
       { upsert: true }
     );
     
-    console.log(`✓ Stored request in DB`);
-    console.log(`  DB operation:`, {matched: result.matchedCount, modified: result.modifiedCount, upserted: result.upsertedId});
-
-    // Verify it was stored
-    const stored = await friendRequestsCollection.findOne({ toUser: toUsername });
-    console.log(`✓ Verified in DB:`, stored);
+    console.log(`✅ Stored request in DB (modified: ${result.modifiedCount}, upserted: ${result.upsertedId ? 'yes' : 'no'})`);
 
     // Notify sender
     ws.send(JSON.stringify({
@@ -749,7 +857,7 @@ async function handleFriendRequest(from, to, ws, currentUser) {
       sentAt: timestamp,
       message: `Friend request sent to ${toUsername}`,
     }));
-    console.log(`✓ Notified sender: ${from}`);
+    console.log(`📤 Notified sender: ${from}`);
 
     // Send to recipient if online
     const toUserConn = userConnections.get(toUsername);
@@ -760,10 +868,12 @@ async function handleFriendRequest(from, to, ws, currentUser) {
         fromId: senderUser.userId,
         sentAt: timestamp,
       }));
-      console.log(`✓ Notified recipient: ${toUsername}`);
+      console.log(`📬 Notified recipient: ${toUsername} (online)`);
     } else {
-      console.log(`⚠ Recipient ${toUsername} is offline (will see on next login)`);
+      console.log(`⏳ Recipient ${toUsername} is offline (will see on next login)`);
     }
+    
+    console.log(`========== ✅ SUCCESS ==========\n`);
   } catch (err) {
     console.error(`❌ Error in handleFriendRequest:`, err);
     ws.send(JSON.stringify({ type: 'error', message: 'Failed to send request' }));
