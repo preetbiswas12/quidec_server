@@ -1041,7 +1041,6 @@ async function handleCancelFriendRequest(from, to, ws, currentUser) {
 }
 
 function handleMarkRead(messageId, to) {
-  const { ObjectId } = require('mongodb');
   const readTimestamp = new Date();
   
   try {
