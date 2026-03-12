@@ -68,6 +68,7 @@ async function fixReadTimestamps() {
   } catch (err) {
     console.error('⚠️ Error fixing read timestamps:', err);
   }
+}
 
 // Middleware
 app.use(cors());
@@ -1308,4 +1309,3 @@ process.on('SIGINT', async () => {
   await mongoClient.close();
   process.exit(0);
 });
-}
