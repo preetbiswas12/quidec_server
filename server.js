@@ -46,11 +46,28 @@ async function connectMongoDB() {
     await friendRequestsCollection.createIndex({ toUser: 1 });
 
     console.log('✅ Connected to MongoDB');
+    
+    // Ensure all read messages have readAt set (migration for old data)
+    await fixReadTimestamps();
   } catch (err) {
     console.error('❌ MongoDB connection failed:', err.message);
     process.exit(1);
   }
 }
+
+// Migrate old messages to ensure read messages have readAt timestamps
+async function fixReadTimestamps() {
+  try {
+    const result = await chatHistoryCollection.updateMany(
+      { read: true, readAt: { $exists: false } },
+      { $set: { readAt: new Date() } }
+    );
+    if (result.modifiedCount > 0) {
+      console.log(`✅ Fixed ${result.modifiedCount} messages with missing readAt timestamps`);
+    }
+  } catch (err) {
+    console.error('⚠️ Error fixing read timestamps:', err);
+  }
 
 // Middleware
 app.use(cors());
@@ -487,9 +504,24 @@ app.get('/api/messages/:username/:withUser', async (req, res) => {
       .sort({ timestamp: 1 })
       .toArray();
     
-    console.log(`📬 Fetched ${messages.length} messages for ${username} ↔ ${withUser}`);
+    // Ensure all messages have proper structure
+    const formattedMessages = messages.map(msg => ({
+      _id: msg._id,
+      messageId: msg._id,
+      conversationKey: msg.conversationKey,
+      from: msg.from,
+      to: msg.to,
+      content: msg.content,
+      timestamp: msg.timestamp,
+      read: msg.read || false,
+      readAt: msg.readAt || null,
+      readBy: msg.readBy || null,
+    }));
     
-    res.json({ messages, count: messages.length });
+    console.log(`📬 Fetched ${formattedMessages.length} messages for ${username} ↔ ${withUser}`);
+    console.log(`   Sample msg: read=${formattedMessages[0]?.read}, readAt=${formattedMessages[0]?.readAt}`);
+    
+    res.json({ messages: formattedMessages, count: formattedMessages.length });
   } catch (err) {
     console.error('Error fetching messages:', err);
     res.status(500).json({ error: 'Failed to fetch messages' });
@@ -1276,3 +1308,4 @@ process.on('SIGINT', async () => {
   await mongoClient.close();
   process.exit(0);
 });
+}
